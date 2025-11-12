@@ -4,6 +4,7 @@ import uuid
 from datetime import datetime
 from dotenv import load_dotenv
 from fastapi import FastAPI, Query, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, field_validator
 from masumi.config import Config
 from masumi.payment import Payment, Amount
@@ -39,6 +40,15 @@ app = FastAPI(
     title="API following the Masumi API Standard",
     description="API for running Agentic Services tasks with Masumi payment integration",
     version="1.0.0"
+)
+
+# Add CORS middleware to allow browser requests
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # Allow all origins (use specific domains in production)
+    allow_credentials=True,
+    allow_methods=["*"],  # Allow all HTTP methods
+    allow_headers=["*"],  # Allow all headers
 )
 
 # ─────────────────────────────────────────────────────────────────────────────
