@@ -1,6 +1,7 @@
 import os
 import uvicorn
 import uuid
+from datetime import datetime
 from dotenv import load_dotenv
 from fastapi import FastAPI, Query, HTTPException
 from pydantic import BaseModel, Field, field_validator
@@ -8,6 +9,15 @@ from masumi.config import Config
 from masumi.payment import Payment, Amount
 from crew_definition import ResearchCrew
 from logging_config import setup_logging
+# RDM Agent Integration
+from rdm_masumi_integration import (
+    execute_goal_creation,
+    execute_reflection_checkin,
+    execute_goal_verification,
+    get_rdm_input_schema,
+    get_agent_metadata_for_registration,
+    get_goal_status
+)
 
 # Configure logging
 logger = setup_logging()
@@ -65,6 +75,23 @@ class StartJobRequest(BaseModel):
 class ProvideInputRequest(BaseModel):
     job_id: str
 
+# RDM-specific models
+class ReflectionRequest(BaseModel):
+    job_id: str
+    goal_id: str
+    status: str  # "Done", "Partially Done", "Not Done", "In Progress"
+    notes: str = ""
+    challenges: str = ""
+    check_in_number: int = 1
+
+class CompleteGoalRequest(BaseModel):
+    job_id: str
+    goal_id: str
+    user_claims_done: bool
+    evidence: str
+    self_assessment: str  # "Done", "Partially Done", "Not Done"
+    verification_method: str = "Self-verification"
+
 # ─────────────────────────────────────────────────────────────────────────────
 # CrewAI Task Execution
 # ─────────────────────────────────────────────────────────────────────────────
@@ -75,6 +102,16 @@ async def execute_crew_task(input_data: str) -> str:
     inputs = {"text": input_data}
     result = crew.crew.kickoff(inputs)
     logger.info("CrewAI task completed successfully")
+    return result
+
+# ─────────────────────────────────────────────────────────────────────────────
+# RDM Agent Task Execution
+# ─────────────────────────────────────────────────────────────────────────────
+async def execute_rdm_goal_creation(input_data: dict) -> str:
+    """ Execute RDM Agent 1: Goal Creation and Pledge """
+    logger.info(f"Starting RDM Goal Creation with input: {input_data}")
+    result = await execute_goal_creation(input_data)
+    logger.info("RDM Goal Creation completed successfully")
     return result
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -174,12 +211,28 @@ async def handle_payment_status(job_id: str, payment_id: str) -> None:
         
         # Update job status to running
         jobs[job_id]["status"] = "running"
-        logger.info(f"Input data: {jobs[job_id]["input_data"]}")
+        logger.info(f"Input data: {jobs[job_id]['input_data']}")
 
-        # Execute the AI task
-        result = await execute_crew_task(jobs[job_id]["input_data"])
+        # Determine which execution path: RDM or Research Crew
+        input_data = jobs[job_id]["input_data"]
+        
+        # If input contains goal_description, use RDM agents
+        if "goal_description" in input_data:
+            logger.info("Using RDM Agent execution path")
+            result = await execute_rdm_goal_creation(input_data)
+            
+            # Store goal-specific data
+            jobs[job_id]["goal_description"] = input_data.get("goal_description", "")
+            jobs[job_id]["pledge_amount"] = input_data.get("pledge_amount", 100)
+            jobs[job_id]["duration"] = input_data.get("duration", "30 days")
+            jobs[job_id]["reflections"] = []
+        else:
+            # Default: use original research crew
+            logger.info("Using Research Crew execution path")
+            result = await execute_crew_task(input_data)
+        
         print(f"Result: {result}")
-        logger.info(f"Crew task completed for job {job_id}")
+        logger.info(f"Task completed for job {job_id}")
         
         # Convert result to string for payment completion
         # Check if result has .raw attribute (CrewOutput), otherwise convert to string
@@ -268,20 +321,9 @@ async def input_schema():
     """
     Returns the expected input schema for the /start_job endpoint.
     Fulfills MIP-003 /input_schema endpoint.
+    Now returns RDM Agent schema for goal-setting and pledge management.
     """
-    return {
-        "input_data": [
-            {
-                "id": "text",
-                "type": "string",
-                "name": "Task Description",
-                "data": {
-                    "description": "The text input for the AI task",
-                    "placeholder": "Enter your task description here"
-                }
-            }
-        ]
-    }
+    return get_rdm_input_schema()
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 6) Health Check
@@ -296,16 +338,146 @@ async def health():
     }
 
 # ─────────────────────────────────────────────────────────────────────────────
+# 7) RDM Agent: Submit Reflection Check-in
+# ─────────────────────────────────────────────────────────────────────────────
+@app.post("/submit_reflection")
+async def submit_reflection(data: ReflectionRequest):
+    """
+    Submit a reflection check-in for a goal (Agent 1)
+    Allows users to log their progress and receive feedback
+    """
+    logger.info(f"Reflection submitted for goal {data.goal_id}")
+    
+    try:
+        if data.job_id not in jobs:
+            raise HTTPException(status_code=404, detail="Job not found")
+        
+        # Execute reflection with Agent 1
+        reflection_data = {
+            "check_in_number": data.check_in_number,
+            "status": data.status,
+            "notes": data.notes,
+            "challenges": data.challenges,
+            "days_since_last": 7  # Calculate based on last check-in
+        }
+        
+        result = await execute_reflection_checkin(data.goal_id, reflection_data)
+        
+        # Store reflection in job
+        if "reflections" not in jobs[data.job_id]:
+            jobs[data.job_id]["reflections"] = []
+        
+        jobs[data.job_id]["reflections"].append({
+            "timestamp": datetime.now().isoformat(),
+            "check_in_number": data.check_in_number,
+            "status": data.status,
+            "result": result
+        })
+        
+        return {
+            "status": "success",
+            "job_id": data.job_id,
+            "goal_id": data.goal_id,
+            "reflection_number": data.check_in_number,
+            "feedback": result
+        }
+    except Exception as e:
+        logger.error(f"Error in submit_reflection: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=400, detail=str(e))
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 8) RDM Agent: Complete Goal and Trigger Verification
+# ─────────────────────────────────────────────────────────────────────────────
+@app.post("/complete_goal")
+async def complete_goal(data: CompleteGoalRequest):
+    """
+    Submit goal completion claim and trigger Agent 2 (Veritas) verification
+    Returns token distribution and final judgment
+    """
+    logger.info(f"Goal completion submitted for goal {data.goal_id}")
+    
+    try:
+        if data.job_id not in jobs:
+            raise HTTPException(status_code=404, detail="Job not found")
+        
+        # Get pledge amount from job
+        pledge_amount = jobs[data.job_id].get("pledge_amount", 100)
+        
+        # Execute verification with Agent 2 (Veritas)
+        completion_data = {
+            "user_claims_done": data.user_claims_done,
+            "evidence": data.evidence,
+            "self_assessment": data.self_assessment,
+            "verification_method": data.verification_method,
+            "goal_description": jobs[data.job_id].get("goal_description", "")
+        }
+        
+        verification_result = await execute_goal_verification(
+            data.goal_id,
+            completion_data,
+            pledge_amount
+        )
+        
+        # Update job status
+        jobs[data.job_id]["status"] = "completed"
+        jobs[data.job_id]["verification_result"] = verification_result
+        jobs[data.job_id]["result"] = verification_result
+        
+        return {
+            "status": "success",
+            "job_id": data.job_id,
+            "goal_id": data.goal_id,
+            "verification_result": verification_result,
+            "message": "Agent 2 (Veritas) has completed verification and token distribution"
+        }
+    except Exception as e:
+        logger.error(f"Error in complete_goal: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=400, detail=str(e))
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 9) RDM Agent: Get Goal Status
+# ─────────────────────────────────────────────────────────────────────────────
+@app.get("/goal_status")
+async def goal_status(goal_id: str):
+    """
+    Get detailed status of a specific goal
+    """
+    logger.info(f"Checking status for goal {goal_id}")
+    
+    try:
+        result = await get_goal_status(goal_id, jobs)
+        return result
+    except Exception as e:
+        logger.error(f"Error in goal_status: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=404, detail="Goal not found")
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 10) RDM Agent: Get Registration Metadata
+# ─────────────────────────────────────────────────────────────────────────────
+@app.get("/agent_metadata")
+async def agent_metadata():
+    """
+    Returns agent metadata for Masumi on-chain registration
+    Follows Masumi metadata standard for agent registry
+    """
+    return get_agent_metadata_for_registration()
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Main Logic if Called as a Script
 # ─────────────────────────────────────────────────────────────────────────────
 def main():
     """Run the standalone agent flow without the API"""
     import os
+    import sys
+    # Set UTF-8 encoding for Windows console
+    if sys.platform == 'win32':
+        sys.stdout.reconfigure(encoding='utf-8')
+        sys.stderr.reconfigure(encoding='utf-8')
     # Disable execution traces to avoid terminal issues
     os.environ['CREWAI_DISABLE_TELEMETRY'] = 'true'
     
     print("\n" + "=" * 70)
-    print("🚀 Running CrewAI agents locally (standalone mode)...")
+    print("Running CrewAI agents locally (standalone mode)...")
     print("=" * 70 + "\n")
     
     # Define test input
@@ -320,7 +492,7 @@ def main():
     
     # Display the result
     print("\n" + "=" * 70)
-    print("✅ Crew Output:")
+    print("Crew Output:")
     print("=" * 70 + "\n")
     print(result)
     print("\n" + "=" * 70 + "\n")
@@ -340,7 +512,7 @@ if __name__ == "__main__":
         host = os.environ.get("API_HOST", "127.0.0.1")
 
         print("\n" + "=" * 70)
-        print("🚀 Starting FastAPI server with Masumi integration...")
+        print("Starting FastAPI server with Masumi integration...")
         print("=" * 70)
         print(f"API Documentation:        http://{host}:{port}/docs")
         print(f"Availability Check:       http://{host}:{port}/availability")

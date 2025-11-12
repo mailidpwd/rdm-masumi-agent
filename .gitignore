@@ -1,6 +1,7 @@
 # Environment
 .env
 .venv/
+.venv311/
 venv/
 ENV/
 .env.local
