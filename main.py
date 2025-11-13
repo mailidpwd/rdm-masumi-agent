@@ -75,13 +75,16 @@ async def global_exception_handler(request: Request, exc: Exception):
     )
 
 # Add CORS middleware to allow browser requests
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],  # Allow all origins (use specific domains in production)
-    allow_credentials=True,
-    allow_methods=["*"],  # Allow all HTTP methods
-    allow_headers=["*"],  # Allow all headers
-)
+try:
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["*"],  # Allow all origins (use specific domains in production)
+        allow_credentials=True,
+        allow_methods=["*"],  # Allow all HTTP methods
+        allow_headers=["*"],  # Allow all headers
+    )
+except Exception as e:
+    logger.error(f"Failed to add CORS middleware: {str(e)}", exc_info=True)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Temporary in-memory job store (DO NOT USE IN PRODUCTION)
@@ -93,10 +96,15 @@ payment_instances = {}
 # Initialize Masumi Payment Config
 # ─────────────────────────────────────────────────────────────────────────────
 # Use defaults if env vars not set (prevents crashes on Railway)
-config = Config(
-    payment_service_url=PAYMENT_SERVICE_URL or "https://masumi-payment-service-production-50ce.up.railway.app/api/v1",
-    payment_api_key=PAYMENT_API_KEY or ""
-)
+try:
+    config = Config(
+        payment_service_url=PAYMENT_SERVICE_URL or "https://masumi-payment-service-production-50ce.up.railway.app/api/v1",
+        payment_api_key=PAYMENT_API_KEY or ""
+    )
+except Exception as e:
+    logger.error(f"Failed to initialize Config: {str(e)}", exc_info=True)
+    # Create a minimal config to prevent crashes
+    config = None
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Pydantic Models
@@ -410,6 +418,12 @@ async def health():
     Returns the health of the server - Minimal implementation
     """
     return JSONResponse(content={"status": "healthy"})
+
+@app.get("/favicon.ico")
+async def favicon():
+    """Return empty favicon to prevent 404/502 errors"""
+    from fastapi.responses import Response
+    return Response(status_code=204)  # No content
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 7) RDM Agent: Submit Reflection Check-in
