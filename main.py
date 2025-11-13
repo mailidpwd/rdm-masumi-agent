@@ -4,7 +4,8 @@ import uuid
 from datetime import datetime
 from typing import Any
 from dotenv import load_dotenv
-from fastapi import FastAPI, Query, HTTPException
+from fastapi import FastAPI, Query, HTTPException, Request
+from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, field_validator
 from masumi.config import Config
@@ -46,12 +47,27 @@ if not PAYMENT_SERVICE_URL:
 if not PAYMENT_API_KEY:
     logger.warning("PAYMENT_API_KEY not set - payment features will not work")
 
-# Initialize FastAPI
+# Initialize FastAPI with error handling
 app = FastAPI(
     title="API following the Masumi API Standard",
     description="API for running Agentic Services tasks with Masumi payment integration",
     version="1.0.0"
 )
+
+# Add global exception handler to catch all errors
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception):
+    """Catch all unhandled exceptions"""
+    logger.error(f"Unhandled exception: {str(exc)}", exc_info=True)
+    return JSONResponse(
+        status_code=500,
+        content={
+            "status": "error",
+            "message": str(exc),
+            "type": type(exc).__name__,
+            "path": str(request.url.path)
+        }
+    )
 
 # Add CORS middleware to allow browser requests
 app.add_middleware(
@@ -404,9 +420,14 @@ async def health():
     """
     Returns the health of the server.
     """
-    return {
-        "status": "healthy"
-    }
+    try:
+        return JSONResponse(content={"status": "healthy"})
+    except Exception as e:
+        logger.error(f"Error in health endpoint: {str(e)}", exc_info=True)
+        return JSONResponse(
+            status_code=500,
+            content={"status": "error", "message": str(e)}
+        )
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 7) RDM Agent: Submit Reflection Check-in
