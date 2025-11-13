@@ -9,7 +9,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, field_validator
 from masumi.config import Config
 from masumi.payment import Payment, Amount
-from crew_definition import ResearchCrew
+# Import ResearchCrew lazily to avoid initialization errors
+# from crew_definition import ResearchCrew
 from logging_config import setup_logging
 # RDM Agent Integration - Import only when needed to avoid agent initialization
 # from rdm_masumi_integration import (
@@ -119,7 +120,12 @@ class CompleteGoalRequest(BaseModel):
 async def execute_crew_task(input_data: str) -> str:
     """ Execute a CrewAI task with Research and Writing Agents """
     logger.info(f"Starting CrewAI task with input: {input_data}")
-    crew = ResearchCrew(logger=logger)
+    try:
+        from crew_definition import ResearchCrew
+        crew = ResearchCrew(logger=logger)
+    except Exception as e:
+        logger.error(f"Failed to import ResearchCrew: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Research crew initialization failed: {str(e)}")
     inputs = {"text": input_data}
     result = crew.crew.kickoff(inputs)
     logger.info("CrewAI task completed successfully")
@@ -371,19 +377,27 @@ async def input_schema():
 @app.get("/")
 async def root():
     """ Root endpoint - API information """
-    return {
-        "service": "RDM Masumi Agent API",
-        "status": "running",
-        "version": "1.0.0",
-        "endpoints": {
-            "health": "/health",
-            "docs": "/docs",
-            "availability": "/availability",
-            "input_schema": "/input_schema",
-            "start_job": "/start_job",
-            "status": "/status"
+    try:
+        return {
+            "service": "RDM Masumi Agent API",
+            "status": "running",
+            "version": "1.0.0",
+            "endpoints": {
+                "health": "/health",
+                "docs": "/docs",
+                "availability": "/availability",
+                "input_schema": "/input_schema",
+                "start_job": "/start_job",
+                "status": "/status"
+            }
         }
-    }
+    except Exception as e:
+        logger.error(f"Error in root endpoint: {str(e)}", exc_info=True)
+        return {
+            "service": "RDM Masumi Agent API",
+            "status": "error",
+            "error": str(e)
+        }
 
 @app.get("/health")
 async def health():
@@ -695,7 +709,12 @@ def main():
     print("\nProcessing with CrewAI agents...\n")
     
     # Initialize and run the crew
-    crew = ResearchCrew(verbose=True)
+    try:
+        from crew_definition import ResearchCrew
+        crew = ResearchCrew(verbose=True)
+    except Exception as e:
+        print(f"Error: Failed to import ResearchCrew: {str(e)}")
+        raise
     result = crew.crew.kickoff(inputs=input_data)
     
     # Display the result
