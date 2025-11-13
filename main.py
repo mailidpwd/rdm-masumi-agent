@@ -406,6 +406,7 @@ async def input_schema():
 @app.get("/")
 async def root():
     """ Root endpoint - API information - Minimal implementation """
+    logger.info("Root endpoint called")
     return JSONResponse(content={
         "service": "RDM Masumi Agent API",
         "status": "running",
@@ -417,6 +418,7 @@ async def health():
     """
     Returns the health of the server - Minimal implementation
     """
+    logger.info("Health endpoint called")
     return JSONResponse(content={"status": "healthy"})
 
 @app.get("/favicon.ico")

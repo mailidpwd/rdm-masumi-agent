@@ -32,13 +32,18 @@ def setup_logging(log_level=logging.INFO):
     root_logger = logging.getLogger()
     root_logger.setLevel(log_level)
     
-    # Remove any existing handlers to prevent duplicates
+    # Remove duplicate handlers
     for handler in root_logger.handlers[:]:
-        if isinstance(handler, logging.StreamHandler):
-            root_logger.removeHandler(handler)
+        root_logger.removeHandler(handler)
     
     # Add the file handler
     root_logger.addHandler(file_handler)
+    
+    # Also log to stdout for platforms like Railway
+    console_formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+    console_handler = logging.StreamHandler()
+    console_handler.setFormatter(console_formatter)
+    root_logger.addHandler(console_handler)
     
     return root_logger
 
