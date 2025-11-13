@@ -368,6 +368,23 @@ async def input_schema():
 # ─────────────────────────────────────────────────────────────────────────────
 # 6) Health Check
 # ─────────────────────────────────────────────────────────────────────────────
+@app.get("/")
+async def root():
+    """ Root endpoint - API information """
+    return {
+        "service": "RDM Masumi Agent API",
+        "status": "running",
+        "version": "1.0.0",
+        "endpoints": {
+            "health": "/health",
+            "docs": "/docs",
+            "availability": "/availability",
+            "input_schema": "/input_schema",
+            "start_job": "/start_job",
+            "status": "/status"
+        }
+    }
+
 @app.get("/health")
 async def health():
     """
