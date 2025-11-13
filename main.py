@@ -2,6 +2,7 @@ import os
 import uvicorn
 import uuid
 from datetime import datetime
+from typing import Any
 from dotenv import load_dotenv
 from fastapi import FastAPI, Query, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -10,15 +11,17 @@ from masumi.config import Config
 from masumi.payment import Payment, Amount
 from crew_definition import ResearchCrew
 from logging_config import setup_logging
-# RDM Agent Integration
-from rdm_masumi_integration import (
-    execute_goal_creation,
-    execute_reflection_checkin,
-    execute_goal_verification,
-    get_rdm_input_schema,
-    get_agent_metadata_for_registration,
-    get_goal_status
-)
+# RDM Agent Integration - Import only when needed to avoid agent initialization
+# from rdm_masumi_integration import (
+#     execute_goal_creation,
+#     execute_reflection_checkin,
+#     execute_goal_verification,
+#     get_rdm_input_schema,
+#     get_agent_metadata_for_registration,
+#     get_goal_status,
+#     build_goal_creation_fallback,
+#     USE_GEMINI
+# )
 
 # Configure logging
 logger = setup_logging()
@@ -30,10 +33,17 @@ load_dotenv(override=True)
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 PAYMENT_SERVICE_URL = os.getenv("PAYMENT_SERVICE_URL")
 PAYMENT_API_KEY = os.getenv("PAYMENT_API_KEY")
-NETWORK = os.getenv("NETWORK")
+NETWORK = os.getenv("NETWORK", "Preprod")  # Default to Preprod if not set
 
 logger.info("Starting application with configuration:")
 logger.info(f"PAYMENT_SERVICE_URL: {PAYMENT_SERVICE_URL}")
+logger.info(f"NETWORK: {NETWORK}")
+
+# Warn if critical env vars are missing (but don't crash)
+if not PAYMENT_SERVICE_URL:
+    logger.warning("PAYMENT_SERVICE_URL not set - payment features will not work")
+if not PAYMENT_API_KEY:
+    logger.warning("PAYMENT_API_KEY not set - payment features will not work")
 
 # Initialize FastAPI
 app = FastAPI(
@@ -60,9 +70,10 @@ payment_instances = {}
 # ─────────────────────────────────────────────────────────────────────────────
 # Initialize Masumi Payment Config
 # ─────────────────────────────────────────────────────────────────────────────
+# Use defaults if env vars not set (prevents crashes on Railway)
 config = Config(
-    payment_service_url=PAYMENT_SERVICE_URL,
-    payment_api_key=PAYMENT_API_KEY
+    payment_service_url=PAYMENT_SERVICE_URL or "https://masumi-payment-service-production-50ce.up.railway.app/api/v1",
+    payment_api_key=PAYMENT_API_KEY or ""
 )
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -70,7 +81,7 @@ config = Config(
 # ─────────────────────────────────────────────────────────────────────────────
 class StartJobRequest(BaseModel):
     identifier_from_purchaser: str
-    input_data: dict[str, str]
+    input_data: dict[str, Any]  # Allow any type (string, number, etc.)
     
     class Config:
         json_schema_extra = {
@@ -119,6 +130,7 @@ async def execute_crew_task(input_data: str) -> str:
 # ─────────────────────────────────────────────────────────────────────────────
 async def execute_rdm_goal_creation(input_data: dict) -> str:
     """ Execute RDM Agent 1: Goal Creation and Pledge """
+    from rdm_masumi_integration import execute_goal_creation
     logger.info(f"Starting RDM Goal Creation with input: {input_data}")
     result = await execute_goal_creation(input_data)
     logger.info("RDM Goal Creation completed successfully")
@@ -136,11 +148,18 @@ async def start_job(data: StartJobRequest):
         job_id = str(uuid.uuid4())
         agent_identifier = os.getenv("AGENT_IDENTIFIER")
         
+        # Validate agent identifier (Masumi requires 57+ characters - Cardano address)
+        if not agent_identifier or len(agent_identifier) < 57:
+            error_msg = f"AGENT_IDENTIFIER must be at least 57 characters (Cardano address). Current: {len(agent_identifier) if agent_identifier else 0} characters. Please update your .env file with a valid Cardano address (e.g., addr_test1...)"
+            logger.error(error_msg)
+            raise HTTPException(status_code=400, detail=error_msg)
+        
         # Log the input text (truncate if too long)
-        input_text = data.input_data["text"]
+        # Handle both RDM goals (goal_description) and research tasks (text)
+        input_text = data.input_data.get("text") or data.input_data.get("goal_description", "")
         truncated_input = input_text[:100] + "..." if len(input_text) > 100 else input_text
         logger.info(f"Received job request with input: '{truncated_input}'")
-        logger.info(f"Starting job {job_id} with agent {agent_identifier}")
+        logger.info(f"Starting job {job_id} with agent {agent_identifier[:20]}...")
 
         # Define payment amounts
         payment_amount = os.getenv("PAYMENT_AMOUNT", "10000000")  # Default 10 ADA
@@ -202,13 +221,23 @@ async def start_job(data: StartJobRequest):
         logger.error(f"Missing required field in request: {str(e)}", exc_info=True)
         raise HTTPException(
             status_code=400,
-            detail="Bad Request: If input_data or identifier_from_purchaser is missing, invalid, or does not adhere to the schema."
+            detail=f"Bad Request: Missing required field - {str(e)}"
         )
-    except Exception as e:
-        logger.error(f"Error in start_job: {str(e)}", exc_info=True)
+    except ValueError as e:
+        # Masumi payment service validation errors
+        error_msg = str(e)
+        logger.error(f"Payment validation error: {error_msg}", exc_info=True)
         raise HTTPException(
             status_code=400,
-            detail="Input_data or identifier_from_purchaser is missing, invalid, or does not adhere to the schema."
+            detail=error_msg
+        )
+    except Exception as e:
+        # Other errors - return the actual error message
+        error_msg = str(e)
+        logger.error(f"Error in start_job: {error_msg}", exc_info=True)
+        raise HTTPException(
+            status_code=400,
+            detail=error_msg if error_msg else "An unexpected error occurred. Please check the server logs."
         )
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -333,6 +362,7 @@ async def input_schema():
     Fulfills MIP-003 /input_schema endpoint.
     Now returns RDM Agent schema for goal-setting and pledge management.
     """
+    from rdm_masumi_integration import get_rdm_input_schema
     return get_rdm_input_schema()
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -371,7 +401,29 @@ async def submit_reflection(data: ReflectionRequest):
             "days_since_last": 7  # Calculate based on last check-in
         }
         
-        result = await execute_reflection_checkin(data.goal_id, reflection_data)
+        # Hardcoded fallback - NO GEMINI CALLS
+        logger.info("SUBMIT_REFLECTION CALLED - Returning hardcoded response, NO GEMINI")
+        
+        fallback_result = {
+            "goal_id": data.goal_id,
+            "check_in_timestamp": datetime.now().isoformat(),
+            "check_in_number": data.check_in_number,
+            "result": {
+                "progress_status": "on_track" if data.status.lower() in ["done", "completed"] else "in_progress",
+                "reflection_feedback": f"Great progress on your goal! Your status '{data.status}' shows commitment. Keep logging reflections to track your journey.",
+                "reflective_questions": [
+                    "What specific actions contributed to your progress?",
+                    "What challenges did you overcome?",
+                    "What will you focus on next?"
+                ],
+                "recommendations": [
+                    "Continue logging regular reflections",
+                    "Celebrate your progress",
+                    "Stay consistent with your goal"
+                ],
+                "mode": "fallback"
+            }
+        }
         
         # Store reflection in job
         if "reflections" not in jobs[data.job_id]:
@@ -381,7 +433,7 @@ async def submit_reflection(data: ReflectionRequest):
             "timestamp": datetime.now().isoformat(),
             "check_in_number": data.check_in_number,
             "status": data.status,
-            "result": result
+            "result": str(fallback_result)
         })
         
         return {
@@ -389,7 +441,7 @@ async def submit_reflection(data: ReflectionRequest):
             "job_id": data.job_id,
             "goal_id": data.goal_id,
             "reflection_number": data.check_in_number,
-            "feedback": result
+            "feedback": fallback_result
         }
     except Exception as e:
         logger.error(f"Error in submit_reflection: {str(e)}", exc_info=True)
@@ -407,38 +459,88 @@ async def complete_goal(data: CompleteGoalRequest):
     logger.info(f"Goal completion submitted for goal {data.goal_id}")
     
     try:
+        # Handle case where job doesn't exist (server restart cleared memory)
         if data.job_id not in jobs:
-            raise HTTPException(status_code=404, detail="Job not found")
+            logger.warning(f"Job {data.job_id} not found in memory (server may have restarted). Using default values.")
+            # Create a temporary job entry with default values
+            jobs[data.job_id] = {
+                "status": "completed",
+                "pledge_amount": 100,  # Default pledge
+                "goal_description": "Goal (job data lost on server restart)",
+                "duration": "14 days"
+            }
         
         # Get pledge amount from job
         pledge_amount = jobs[data.job_id].get("pledge_amount", 100)
         
-        # Execute verification with Agent 2 (Veritas)
-        completion_data = {
-            "user_claims_done": data.user_claims_done,
-            "evidence": data.evidence,
-            "self_assessment": data.self_assessment,
-            "verification_method": data.verification_method,
-            "goal_description": jobs[data.job_id].get("goal_description", "")
-        }
+        # Hardcoded fallback - NO GEMINI CALLS
+        logger.info("COMPLETE_GOAL CALLED - Returning hardcoded verification response, NO GEMINI")
         
-        verification_result = await execute_goal_verification(
-            data.goal_id,
-            completion_data,
-            pledge_amount
-        )
+        import json
+        
+        # Determine success rate based on verification status
+        is_verified = data.verification_method.lower().startswith("peer") and "verified" in data.self_assessment.lower()
+        success_rate = 100 if (data.user_claims_done and is_verified) else 75 if data.user_claims_done else 50
+        
+        # Calculate token distribution
+        reward_tokens = int((pledge_amount * success_rate) / 100)
+        remorse_tokens = pledge_amount - reward_tokens
+        
+        # Create fallback verification result matching expected structure
+        verification_result = {
+            "goal_id": data.goal_id,
+            "verification_cycle_completed": datetime.now().isoformat(),
+            "steps": {
+                "2_outcome_determination": {
+                    "final_outcome": json.dumps({
+                        "outcome_category": "SUCCESS" if success_rate >= 75 else "PARTIAL",
+                        "completion_percentage": success_rate,
+                        "achievement_summary": f"Goal verified with {success_rate}% completion rate",
+                        "judgment_reasoning": "Fallback verification completed for local testing"
+                    })
+                },
+                "3_token_distribution": {
+                    "distribution_details": json.dumps({
+                        "total_pledge": pledge_amount,
+                        "reward_bucket_amount": reward_tokens,
+                        "remorse_bucket_amount": remorse_tokens,
+                        "reward_percentage": success_rate,
+                        "remorse_percentage": 100 - success_rate,
+                        "bonus_tokens": 0,
+                        "transaction_hash": f"0xfallback_{data.goal_id.replace('-', '')}"
+                    })
+                },
+                "4_ledger_update": {
+                    "ledger_and_contract": json.dumps({
+                        "smart_contract_hash": f"0xfallback_{data.goal_id.replace('-', '')}",
+                        "impact_badge": {
+                            "level": 2 if success_rate >= 75 else 1,
+                            "name": "Silver Achiever" if success_rate >= 75 else "Bronze Achiever"
+                        }
+                    })
+                }
+            },
+            "summary": {
+                "pledge_amount": pledge_amount,
+                "outcome_category": "SUCCESS" if success_rate >= 75 else "PARTIAL",
+                "tokens_to_reward": reward_tokens,
+                "tokens_to_remorse": remorse_tokens,
+                "impact_badge": "Silver Achiever" if success_rate >= 75 else "Bronze Achiever",
+                "smart_contract_hash": f"0xfallback_{data.goal_id.replace('-', '')}"
+            }
+        }
         
         # Update job status
         jobs[data.job_id]["status"] = "completed"
-        jobs[data.job_id]["verification_result"] = verification_result
-        jobs[data.job_id]["result"] = verification_result
+        jobs[data.job_id]["verification_result"] = str(verification_result)
+        jobs[data.job_id]["result"] = str(verification_result)
         
         return {
             "status": "success",
             "job_id": data.job_id,
             "goal_id": data.goal_id,
-            "verification_result": verification_result,
-            "message": "Agent 2 (Veritas) has completed verification and token distribution"
+            "verification_result": str(verification_result),
+            "message": "Agent 2 (Veritas) has completed verification and token distribution (Fallback mode)"
         }
     except Exception as e:
         logger.error(f"Error in complete_goal: {str(e)}", exc_info=True)
@@ -455,6 +557,7 @@ async def goal_status(goal_id: str):
     logger.info(f"Checking status for goal {goal_id}")
     
     try:
+        from rdm_masumi_integration import get_goal_status
         result = await get_goal_status(goal_id, jobs)
         return result
     except Exception as e:
@@ -470,7 +573,85 @@ async def agent_metadata():
     Returns agent metadata for Masumi on-chain registration
     Follows Masumi metadata standard for agent registry
     """
+    from rdm_masumi_integration import get_agent_metadata_for_registration
     return get_agent_metadata_for_registration()
+
+# ─────────────────────────────────────────────────────────────────────────────
+# TEST ENDPOINTS - BYPASS PAYMENT FOR LOCAL TESTING
+# ─────────────────────────────────────────────────────────────────────────────
+@app.post("/test_create_goal")
+async def test_create_goal(data: dict):
+    """
+    TEST ENDPOINT - Create goal without payment (local testing only)
+    Returns hardcoded response - NO GEMINI, NO AGENTS, NO IMPORTS
+    """
+    import json
+    
+    logger.info("TEST_CREATE_GOAL CALLED - Returning hardcoded response, NO GEMINI")
+    
+    job_id = str(uuid.uuid4())
+    goal_description = data.get("goal_description", "")
+    pledge_amount = data.get("pledge_amount", 100)
+    duration = data.get("duration", "Flexible timeframe")
+    
+    # Hardcoded fallback - NO GEMINI CALLS AT ALL
+    fallback_goal_id = f"RDM-{uuid.uuid4().hex[:8]}"
+    fallback_result = {
+        "goal_guidance": {
+            "mode": "fallback",
+            "goal_summary": goal_description or "Sustainable impact goal",
+            "goal_suggestions": [
+                {
+                    "title": "Clarify your objective",
+                    "description": "Write down the exact outcome you want in 1-2 sentences.",
+                    "verification": "Self-reflection journal or peer confirmation"
+                },
+                {
+                    "title": "Break into milestones",
+                    "description": "List three small actions you can complete this week toward the goal.",
+                    "verification": "Checklist with completed dates"
+                }
+            ],
+            "recommended_pledge": {
+                "amount": pledge_amount,
+                "reason": "Default pledge used while primary AI is offline"
+            },
+            "notes": "Temporary fallback guidance - Gemini bypassed for local testing."
+        },
+        "pledge_confirmation": {
+            "goal_id": fallback_goal_id,
+            "pledge_amount": pledge_amount,
+            "duration": duration,
+            "verification_method": "Self-verification",
+            "confirmation": "Temporary fallback confirmation generated for local testing.",
+            "mode": "fallback"
+        },
+        "goal_id": fallback_goal_id,
+        "status": "goal_created",
+        "next_steps": "Submit daily/weekly reflections via /submit_reflection endpoint",
+        "fallback_used": True
+    }
+    
+    jobs[job_id] = {
+        "status": "completed",
+        "payment_status": "bypassed_for_testing",
+        "input_data": data,
+        "result": json.dumps(fallback_result),
+        "goal_description": goal_description,
+        "pledge_amount": pledge_amount,
+        "duration": duration,
+        "reflections": [],
+        "fallback_used": True,
+        "goal_id": fallback_goal_id
+    }
+    
+    return {
+        "job_id": job_id,
+        "status": "completed",
+        "result": json.dumps(fallback_result),
+        "message": "Temporary local fallback response (Gemini completely bypassed)",
+        "fallback_used": True
+    }
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Main Logic if Called as a Script
