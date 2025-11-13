@@ -58,14 +58,19 @@ app = FastAPI(
 @app.exception_handler(Exception)
 async def global_exception_handler(request: Request, exc: Exception):
     """Catch all unhandled exceptions"""
-    logger.error(f"Unhandled exception: {str(exc)}", exc_info=True)
+    try:
+        # Try to log, but don't fail if logger is broken
+        if logger:
+            logger.error(f"Unhandled exception: {str(exc)}", exc_info=True)
+    except:
+        pass  # Ignore logger errors
+    
     return JSONResponse(
         status_code=500,
         content={
             "status": "error",
             "message": str(exc),
-            "type": type(exc).__name__,
-            "path": str(request.url.path)
+            "type": type(exc).__name__
         }
     )
 
@@ -392,42 +397,19 @@ async def input_schema():
 # ─────────────────────────────────────────────────────────────────────────────
 @app.get("/")
 async def root():
-    """ Root endpoint - API information """
-    try:
-        return {
-            "service": "RDM Masumi Agent API",
-            "status": "running",
-            "version": "1.0.0",
-            "endpoints": {
-                "health": "/health",
-                "docs": "/docs",
-                "availability": "/availability",
-                "input_schema": "/input_schema",
-                "start_job": "/start_job",
-                "status": "/status"
-            }
-        }
-    except Exception as e:
-        logger.error(f"Error in root endpoint: {str(e)}", exc_info=True)
-        return {
-            "service": "RDM Masumi Agent API",
-            "status": "error",
-            "error": str(e)
-        }
+    """ Root endpoint - API information - Minimal implementation """
+    return JSONResponse(content={
+        "service": "RDM Masumi Agent API",
+        "status": "running",
+        "version": "1.0.0"
+    })
 
 @app.get("/health")
 async def health():
     """
-    Returns the health of the server.
+    Returns the health of the server - Minimal implementation
     """
-    try:
-        return JSONResponse(content={"status": "healthy"})
-    except Exception as e:
-        logger.error(f"Error in health endpoint: {str(e)}", exc_info=True)
-        return JSONResponse(
-            status_code=500,
-            content={"status": "error", "message": str(e)}
-        )
+    return JSONResponse(content={"status": "healthy"})
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 7) RDM Agent: Submit Reflection Check-in
